@@ -2,14 +2,12 @@ FROM node:18-slim
 
 WORKDIR /app
 
-# Copy everything from repo
 COPY . .
 
-# Verify
-RUN ls -la
-RUN pwd
-RUN ls -la agent/ || echo "no agent"
-RUN ls -la agent/scripts/ || echo "no scripts"
+RUN echo "=== BUILD TIME: $(date) ===" 
+RUN echo "=== FILES IN /app ===" && ls -la
+RUN echo "=== FILES IN /app/agent ===" && ls -la agent/ || echo "NO AGENT"
+RUN echo "=== FILES IN /app/agent/scripts ===" && ls -la agent/scripts/ || echo "NO SCRIPTS"
 
 EXPOSE 8080
 
