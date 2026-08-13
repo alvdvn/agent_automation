@@ -1,0 +1,12 @@
+{
+  "name": "figma-agent-server",
+  "version": "1.0.0",
+  "description": "Figma Agent API Server",
+  "main": "api-server.js",
+  "scripts": {
+    "start": "node api-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
