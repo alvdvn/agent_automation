@@ -1,29 +1,24 @@
-// Figma Agent API Server v2
-// Receives webhook calls from n8n and processes Figma design requests
+// Figma Agent API Server v3
+// Receives webhook calls from n8n and triggers Cursor IDE to generate Flutter code
 
 const http = require('http');
-const { spawn } = require('child_process');
-const Redis = require('ioredis');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 8080;
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const OUTPUT_DIR = process.env.OUTPUT_DIR || '/tmp/figma_output';
+const POLL_URL = process.env.CURSOR_POLL_URL || '';
 
-let redis = null;
-
-// Try to connect to Redis
-try {
-  redis = new Redis(REDIS_URL, { maxRetriesPerRequest: 3, retryDelayOnFailover: 100 });
-  redis.on('error', (err) => console.log('Redis not available, using in-memory store'));
-} catch (e) {
-  console.log('Redis not available, using in-memory store');
+// Ensure output directory exists
+if (!fs.existsSync(OUTPUT_DIR)) {
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-// In-memory queue as fallback
+// In-memory queue
 const requestQueue = [];
 let requestId = 0;
 
 const server = http.createServer(async (req, res) => {
-  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -34,6 +29,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Health check
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
@@ -44,13 +40,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // === MAIN ENDPOINT: Receive webhook from n8n ===
   if (req.url === '/api/agent/generate' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
         const data = JSON.parse(body);
-        const { message, context, figmaUrl, fileKey, nodeId } = data;
+        const { message, figmaUrl, fileKey, nodeId } = data;
         
         // Extract Figma URL from message if not provided directly
         let finalFigmaUrl = figmaUrl;
@@ -67,54 +64,47 @@ const server = http.createServer(async (req, res) => {
           fileKey: fileKey || extractFileKey(finalFigmaUrl),
           nodeId: nodeId || extractNodeId(finalFigmaUrl),
           message,
-          context,
           status: 'pending',
           createdAt: new Date().toISOString()
         };
         
-        console.log('=== NEW REQUEST ===');
-        console.log('ID:', request.id);
-        console.log('Figma URL:', request.figmaUrl);
-        console.log('File Key:', request.fileKey);
-        console.log('Node ID:', request.nodeId);
-        console.log('====================');
+        console.log('╔══════════════════════════════════════════╗');
+        console.log('║         NEW FIGMA REQUEST RECEIVED        ║');
+        console.log('╠══════════════════════════════════════════╣');
+        console.log('║ ID:', request.id);
+        console.log('║ Figma URL:', request.figmaUrl);
+        console.log('║ File Key:', request.fileKey);
+        console.log('║ Node ID:', request.nodeId);
+        console.log('╚══════════════════════════════════════════╝');
         
-        // Store in queue
-        if (redis) {
-          await redis.lpush('figma_requests', JSON.stringify(request));
-        } else {
-          requestQueue.push(request);
-        }
-
+        // Save request to file (for Cursor IDE to read)
+        const requestFile = path.join(OUTPUT_DIR, `request_${request.id}.json`);
+        fs.writeFileSync(requestFile, JSON.stringify(request, null, 2));
+        
+        // Also add to queue
+        requestQueue.push(request);
+        
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: true,
           request_id: request.id,
           status: 'queued',
           figma_url: request.figmaUrl,
-          message: 'Request queued. Use /api/agent/next to get pending request.'
+          instructions: 'Check /api/agent/next to get pending requests'
         }));
+        
       } catch (error) {
         console.error('Error:', error);
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: error.message, status: 'error' }));
+        res.end(JSON.stringify({ error: error.message }));
       }
     });
     return;
   }
 
-  // Get next pending request (for Cursor Agent to poll)
+  // === POLL: Cursor IDE calls this to get next pending request ===
   if (req.url === '/api/agent/next' && req.method === 'GET') {
-    let request = null;
-    
-    if (redis) {
-      const data = await redis.rpop('figma_requests');
-      if (data) {
-        request = JSON.parse(data);
-      }
-    } else {
-      request = requestQueue.shift();
-    }
+    const request = requestQueue.shift();
     
     if (request) {
       request.status = 'processing';
@@ -129,33 +119,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Complete a request with generated code
+  // === COMPLETE: Cursor IDE calls this after generating code ===
   if (req.url.startsWith('/api/agent/complete/') && req.method === 'POST') {
-    const requestId = req.url.split('/').pop();
+    const reqId = req.url.split('/').pop();
     let body = '';
     req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
+    req.on('end', () => {
       try {
         const result = JSON.parse(body);
         
-        console.log('=== REQUEST COMPLETED ===');
-        console.log('ID:', requestId);
-        console.log('Files generated:', result.files?.length || 0);
-        console.log('========================');
+        console.log('╔══════════════════════════════════════════╗');
+        console.log('║      CODE GENERATION COMPLETED!          ║');
+        console.log('╠══════════════════════════════════════════╣');
+        console.log('║ Request ID:', reqId);
+        console.log('║ Files:', result.files?.length || 0);
+        console.log('║ Output:', result.outputDir || 'N/A');
+        console.log('╚══════════════════════════════════════════╝');
         
-        // Store completed result
-        const completedData = {
-          requestId,
-          ...result,
-          completedAt: new Date().toISOString()
-        };
-        
-        if (redis) {
-          await redis.lpush('figma_completed', JSON.stringify(completedData));
-        }
+        // Save result
+        const resultFile = path.join(OUTPUT_DIR, `result_${reqId}.json`);
+        fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, result: completedData }));
+        res.end(JSON.stringify({ success: true }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: error.message }));
@@ -164,7 +150,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Get queue status
+  // === QUEUE STATUS ===
   if (req.url === '/api/queue/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -174,7 +160,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.writeHead(404);
   res.end(JSON.stringify({ error: 'Not found' }));
 });
 
@@ -191,8 +177,16 @@ function extractNodeId(url) {
 }
 
 server.listen(PORT, () => {
-  console.log(`Figma Agent API Server v2 running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Agent endpoint: http://localhost:${PORT}/api/agent/generate`);
-  console.log(`Poll endpoint: http://localhost:${PORT}/api/agent/next`);
+  console.log('');
+  console.log('╔══════════════════════════════════════════╗');
+  console.log('║   FIGMA AGENT API SERVER v3 STARTED     ║');
+  console.log('╠══════════════════════════════════════════╣');
+  console.log(`║ Port: ${PORT}`);
+  console.log(`║ Output: ${OUTPUT_DIR}`);
+  console.log(`║ Endpoints:`);
+  console.log(`║   POST /api/agent/generate`);
+  console.log(`║   GET  /api/agent/next`);
+  console.log(`║   POST /api/agent/complete/{id}`);
+  console.log(`║   GET  /api/queue/status`);
+  console.log('╚══════════════════════════════════════════╝');
 });
