@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Extract Figma webhook payload\nconst webhookData = $input.first().json;\n\nconst figmaEvent = webhookData.event_type;\nconst fileKey = webhookData.file_key;\nconst fileName = webhookData.file_name;\nconst triggerSource = webhookData.trigger_source;\n\n// Build message for agent\nconst message = {\n  action: 'generate_code',\n  figma: {\n    fileKey,\n    fileName,\n    event: figmaEvent,\n    timestamp: new Date().toISOString()\n  },\n  prompt: `Figma file \"${fileName}\" has been updated. Generate Flutter code for the latest changes.`\n};\n\nreturn [{ json: message }];"
+        "jsCode": "// Extract Figma webhook payload\nconst webhookData = $input.first().json;\n\n// Get data from webhook (handles both raw body and wrapped format)\nconst figmaUrl = webhookData.figmaUrl || webhookData.body?.figmaUrl;\nconst fileKey = webhookData.file_key || webhookData.body?.file_key;\nconst nodeId = webhookData.node_id || webhookData.body?.node_id;\nconst action = webhookData.action || webhookData.body?.action || 'generate_ui';\n\n// Extract fileKey from URL if not provided\nlet finalFileKey = fileKey;\nif (!finalFileKey && figmaUrl) {\n  const urlMatch = figmaUrl.match(/figma\\.com\\/(?:file|design)\\/([a-zA-Z0-9]+)/);\n  if (urlMatch) {\n    finalFileKey = urlMatch[1];\n  }\n}\n\n// Extract nodeId from URL if not provided\nlet finalNodeId = nodeId;\nif (!finalNodeId && figmaUrl) {\n  const nodeMatch = figmaUrl.match(/node-id=([^&\\s]+)/);\n  if (nodeMatch) {\n    finalNodeId = nodeMatch[1].replace(/-/g, ':');\n  }\n}\n\n// Build message for agent\nconst message = `Generate Flutter code for this Figma design: ${figmaUrl}`;\n\nconst request = {\n  action: action,\n  figmaUrl: figmaUrl,\n  fileKey: finalFileKey,\n  nodeId: finalNodeId,\n  message: message,\n  context: {\n    source: 'n8n_webhook',\n    webhook_url: webhookData.webhookUrl,\n    timestamp: new Date().toISOString()\n  }\n};\n\nconsole.log('=== WEBHOOK RECEIVED ===');\nconsole.log('Figma URL:', figmaUrl);\nconsole.log('File Key:', finalFileKey);\nconsole.log('Node ID:', finalNodeId);\nconsole.log('========================');\n\nreturn [{ json: request }];"
       },
       "id": "format-request",
       "name": "Format Request",
@@ -27,7 +27,8 @@
     },
     {
       "parameters": {
-        "url": "={{$env.CURSOR_AGENT_URL || 'http://localhost:8080'}}/api/agent/generate",
+        "url": "={{$env.CURSOR_AGENT_URL || 'https://agentautomation-production.up.railway.app'}}",
+        "path": "/api/agent/generate",
         "method": "POST",
         "sendHeaders": true,
         "headerParameters": {
@@ -43,18 +44,8 @@
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "message",
-              "value": "={{$json.prompt}}"
-            },
-            {
-              "name": "context",
-              "value": "={{$json.figma}}"
-            }
-          ]
-        },
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
         "options": {}
       },
       "id": "call-agent",
@@ -65,7 +56,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Handle agent response\nconst agentResponse = $input.first().json;\n\n// Log for debugging\nconsole.log('Agent response:', JSON.stringify(agentResponse, null, 2));\n\n// Extract generated code\nconst generatedCode = agentResponse.code || agentResponse.generated_code || [];\nconst status = agentResponse.status || 'unknown';\n\nreturn [{\n  json: {\n    status,\n    generated_files: generatedCode.length,\n    files: generatedCode,\n    timestamp: new Date().toISOString()\n  }\n}];"
+        "jsCode": "// Handle agent response\nconst agentResponse = $input.first().json;\n\nconsole.log('=== AGENT RESPONSE ===');\nconsole.log(JSON.stringify(agentResponse, null, 2));\nconsole.log('======================');\n\n// Return response\nreturn [{ json: agentResponse }];"
       },
       "id": "process-response",
       "name": "Process Response",
@@ -75,16 +66,17 @@
     },
     {
       "parameters": {
-        "message": "=Figma code generation completed!\n\nStatus: {{$json.status}}\nFiles generated: {{$json.generated_files}}\n\nTimestamp: {{$json.timestamp}}"
+        "respondWith": {
+          "respondWith": "json",
+          "responseBody": "={{ $json }}"
+        },
+        "options": {}
       },
-      "id": "notify-slack",
-      "name": "Notify (Slack/Email)",
-      "type": "n8n-nodes-base.slack",
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1050, 300],
-      "credentials": {
-        "slackApi": {}
-      }
+      "position": [1050, 300]
     }
   ],
   "connections": {
@@ -125,7 +117,7 @@
       "main": [
         [
           {
-            "node": "Notify (Slack/Email)",
+            "node": "Respond to Webhook",
             "type": "main",
             "index": 0
           }
@@ -139,6 +131,6 @@
   "staticData": null,
   "tags": [],
   "triggerCount": 1,
-  "updatedAt": "2024-01-01T00:00:00.000Z",
-  "versionId": "1"
+  "updatedAt": "2026-08-13T07:00:00.000Z",
+  "versionId": "2"
 }
