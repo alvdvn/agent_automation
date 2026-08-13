@@ -1,0 +1,144 @@
+{
+  "name": "Figma Trigger Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "figma-trigger",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "figma-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Figma webhook payload\nconst webhookData = $input.first().json;\n\nconst figmaEvent = webhookData.event_type;\nconst fileKey = webhookData.file_key;\nconst fileName = webhookData.file_name;\nconst triggerSource = webhookData.trigger_source;\n\n// Build message for agent\nconst message = {\n  action: 'generate_code',\n  figma: {\n    fileKey,\n    fileName,\n    event: figmaEvent,\n    timestamp: new Date().toISOString()\n  },\n  prompt: `Figma file \"${fileName}\" has been updated. Generate Flutter code for the latest changes.`\n};\n\nreturn [{ json: message }];"
+      },
+      "id": "format-request",
+      "name": "Format Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.CURSOR_AGENT_URL || 'http://localhost:8080'}}/api/agent/generate",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.AGENT_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{$json.prompt}}"
+            },
+            {
+              "name": "context",
+              "value": "={{$json.figma}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "call-agent",
+      "name": "Call Agent API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle agent response\nconst agentResponse = $input.first().json;\n\n// Log for debugging\nconsole.log('Agent response:', JSON.stringify(agentResponse, null, 2));\n\n// Extract generated code\nconst generatedCode = agentResponse.code || agentResponse.generated_code || [];\nconst status = agentResponse.status || 'unknown';\n\nreturn [{\n  json: {\n    status,\n    generated_files: generatedCode.length,\n    files: generatedCode,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "process-response",
+      "name": "Process Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "message": "=Figma code generation completed!\n\nStatus: {{$json.status}}\nFiles generated: {{$json.generated_files}}\n\nTimestamp: {{$json.timestamp}}"
+      },
+      "id": "notify-slack",
+      "name": "Notify (Slack/Email)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "credentials": {
+        "slackApi": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Format Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Request": {
+      "main": [
+        [
+          {
+            "node": "Call Agent API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Agent API": {
+      "main": [
+        [
+          {
+            "node": "Process Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Response": {
+      "main": [
+        [
+          {
+            "node": "Notify (Slack/Email)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

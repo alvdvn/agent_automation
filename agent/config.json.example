@@ -1,0 +1,21 @@
+{
+  "figma": {
+    "accessToken": "${FIGMA_ACCESS_TOKEN}",
+    "fileKey": "optional-default-file-key"
+  },
+  "agent": {
+    "model": "claude-opus-4",
+    "temperature": 0.7,
+    "maxTokens": 4000
+  },
+  "flutter": {
+    "outputPath": "lib/generated",
+    "useMaterial3": true,
+    "generateTheme": true,
+    "supportDarkMode": true
+  },
+  "n8n": {
+    "webhookUrl": "${N8N_WEBHOOK_URL}",
+    "apiKey": "${N8N_API_KEY}"
+  }
+}
