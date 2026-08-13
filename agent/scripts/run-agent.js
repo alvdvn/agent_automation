@@ -3,48 +3,42 @@
 /**
  * Figma to Flutter Agent
  * 
- * Run this script on your LOCAL machine (not on Railway!)
- * It will:
- * 1. Poll Railway server for pending Figma requests
- * 2. Read Figma design using Figma MCP
- * 3. Generate Flutter/Dart code
- * 4. Save files to your project
- * 5. Notify server when complete
+ * Standalone version - generates Flutter code from Figma designs
+ * 
+ * Usage:
+ *   node run-agent.js --url "https://www.figma.com/design/..."
+ *   node run-agent.js --poll  (poll Railway server for tasks)
  */
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execSync, exec } = require('child_process');
 
 // === CONFIGURATION ===
 const SERVER_URL = process.env.AGENT_SERVER_URL || 'https://agentautomation-production.up.railway.app';
 const OUTPUT_DIR = process.env.FLUTTER_PROJECT_DIR || '/Users/vtit/Documents/AgentFigmaCode/figma_output';
-const POLL_INTERVAL = 5000; // Poll every 5 seconds
+const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '5000');
+const FIGMA_TOKEN = process.env.FIGMA_ACCESS_TOKEN || '';
 
-// Create output directory
-if (!fs.existsSync(OUTPUT_DIR)) {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-}
-
-// === LOGO ===
-console.log(`
-╔══════════════════════════════════════════════════════════╗
-║         FIGMA TO FLUTTER AGENT v1.0                   ║
-║         Running on LOCAL machine                       ║
-╚══════════════════════════════════════════════════════════╝
-`);
-
-console.log(`Server URL: ${SERVER_URL}`);
-console.log(`Output Dir: ${OUTPUT_DIR}`);
-console.log(`Poll Interval: ${POLL_INTERVAL}ms`);
-console.log('');
-
-// === API HELPERS ===
-function apiGet(endpoint) {
+// === HELPERS ===
+function httpsGet(url) {
   return new Promise((resolve, reject) => {
-    const url = new URL(endpoint, SERVER_URL);
-    http.get(url, (res) => {
+    const urlObj = new URL(url);
+    const protocol = urlObj.protocol === 'https:' ? https : http;
+    
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'X-Figma-Token': FIGMA_TOKEN
+      }
+    };
+    
+    const req = protocol.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -54,322 +48,359 @@ function apiGet(endpoint) {
           resolve(data);
         }
       });
-    }).on('error', reject);
-  });
-}
-
-function apiPost(endpoint, body) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(endpoint, SERVER_URL);
-    const data = JSON.stringify(body);
-    
-    const options = {
-      hostname: url.hostname,
-      port: url.port || 443,
-      path: url.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': data.length
-      }
-    };
-    
-    const req = http.request(options, (res) => {
-      let response = '';
-      res.on('data', chunk => response += chunk);
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(response));
-        } catch (e) {
-          resolve(response);
-        }
-      });
     });
     
     req.on('error', reject);
-    req.write(data);
     req.end();
   });
 }
 
-// === FIGMA API (Direct call without MCP) ===
+// === FIGMA API ===
 async function getFigmaDesign(fileKey, nodeId) {
-  // Figma API v4 - không cần token cho public files!
-  console.log(`📡 Fetching Figma design: ${fileKey}/${nodeId}`);
+  console.log(`📡 Fetching Figma design...`);
+  console.log(`   File: ${fileKey}`);
+  console.log(`   Node: ${nodeId}`);
   
-  // Get node details
   const nodeIds = encodeURIComponent(nodeId);
   const url = `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${nodeIds}`;
   
-  // Thử không có token trước (cho public files)
-  const response = await fetch(url, {
-    headers: {
-      'X-Figma-Token': process.env.FIGMA_ACCESS_TOKEN || ''
-    }
-  });
+  const data = await httpsGet(url);
   
-  if (!response.ok) {
-    // Thử cách khác - export endpoint
-    console.log('⚠️ Standard API failed, trying export...');
-    const exportUrl = `https://api.figma.com/v1/images/${fileKey}?ids=${nodeId}&format=png`;
-    const exportRes = await fetch(exportUrl, {
-      headers: {
-        'X-Figma-Token': process.env.FIGMA_ACCESS_TOKEN || ''
-      }
-    });
-    
-    if (!exportRes.ok) {
-      throw new Error(`Figma API error: ${response.status}. Make sure file is set to "Anyone with link can view"`);
-    }
-    
-    const exportData = await exportRes.json();
-    return {
-      document: { type: 'DOCUMENT' },
-      nodes: {},
-      images: exportData.images
-    };
+  if (data.err) {
+    throw new Error(data.err);
   }
   
-  const data = await response.json();
   return data;
 }
 
-// === CODE GENERATION ===
-function generateFlutterCode(figmaData) {
-  console.log('⚙️  Generating Flutter code...');
+async function getFigmaImage(fileKey, nodeId) {
+  console.log(`📷 Getting Figma screenshot...`);
+  const nodeIds = encodeURIComponent(nodeId);
+  const url = `https://api.figma.com/v1/images/${fileKey}?ids=${nodeIds}&format=png&scale=2`;
   
-  // Extract components from Figma data
-  const document = figmaData.document;
-  const nodeId = Object.keys(figmaData.nodes)[0];
-  const node = figmaData.nodes[nodeId];
-  
-  // Get screen name
-  const screenName = node.name.replace(/[^a-zA-Z0-9]/g, '_');
-  
-  // Generate Dart code
-  const dartCode = generateScreenCode(screenName, node);
-  
-  return {
-    screenName,
-    dartCode,
-    nodeId
-  };
+  const data = await httpsGet(url);
+  return data.images?.[nodeId];
 }
 
-function generateScreenCode(name, figmaNode) {
-  // Simple Flutter screen generator based on Figma data
-  const children = figmaNode.document?.children || [];
-  const hasText = children.some(c => c.type === 'TEXT');
-  const hasRectangles = children.some(c => c.type === 'RECTANGLE');
-  const hasComponents = children.some(c => c.type === 'COMPONENT');
+// === CODE GENERATION ===
+function generateFlutterCode(figmaData, screenName) {
+  console.log('⚙️  Generating Flutter code...');
   
-  return `import 'package:flutter/material.dart';
+  const node = figmaData.nodes ? Object.values(figmaData.nodes)[0] : null;
+  if (!node) {
+    throw new Error('No nodes found in Figma response');
+  }
+  
+  const cleanName = screenName.replace(/[^a-zA-Z0-9]/g, '_');
+  const className = cleanName.charAt(0).toUpperCase() + cleanName.slice(1);
+  
+  // Analyze Figma node structure
+  const children = extractChildren(node);
+  const colors = extractColors(node);
+  const textStyles = extractTextStyles(node);
+  
+  const dartCode = `import 'package:flutter/material.dart';
 
 /// Auto-generated Flutter screen from Figma
-/// Node ID: ${figmaNode.id}
-class ${name}Screen extends StatelessWidget {
-  const ${name}Screen({super.key});
+/// Screen: ${screenName}
+class ${className}Screen extends StatefulWidget {
+  const ${className}Screen({super.key});
 
+  @override
+  State<${className}Screen createState() => _${className}ScreenState();
+}
+
+class _${className}ScreenState extends State<${className}Screen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: ${colors.backgroundColor || 'Colors.white'},
       appBar: AppBar(
-        title: const Text('${name.replace(/_/g, ' ')}'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        title: const Text('${screenName}'),
+        backgroundColor: ${colors.primaryColor || 'Colors.blue'},
+        foregroundColor: Colors.white,
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16.0),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              ${generateWidgetCode(children)}
+              ${generateChildWidgets(children, 0)}
             ],
           ),
         ),
       ),
     );
   }
-${generateWidgetMethods(children)}
-` + generateHelperWidgets();
+}
+${generateWidgets(children, 1)}
+`;
+
+  return dartCode;
 }
 
-function generateWidgetCode(children) {
-  return children.map(child => {
-    if (child.type === 'TEXT') {
-      const text = child.characters || child.name;
-      const style = child.style || {};
-      const fontSize = style.fontSize || 16;
-      const fontWeight = style.fontWeight || 400;
-      return `Text(
-                '${escapeString(text)}',
-                style: TextStyle(
-                  fontSize: ${fontSize}.0,
-                  fontWeight: FontWeight.w${fontWeight},
-                ),
-              ),
-              const SizedBox(height: 8),`;
+function extractChildren(node) {
+  const children = [];
+  
+  function traverse(n, depth = 0) {
+    if (depth > 5) return; // Limit depth
+    
+    if (n.children) {
+      for (const child of n.children) {
+        children.push({
+          type: n.type,
+          name: n.name,
+          id: n.id,
+          fills: n.fills,
+          absoluteBoundingBox: n.absoluteBoundingBox,
+          style: n.style,
+          children: n.children ? n.children.length : 0
+        });
+        traverse(child, depth + 1);
+      }
+    }
+  }
+  
+  traverse(node);
+  return children.slice(0, 20); // Limit to 20 elements
+}
+
+function extractColors(node) {
+  const colors = {
+    backgroundColor: null,
+    primaryColor: null
+  };
+  
+  function findColors(n) {
+    if (n.fills && n.fills.length > 0) {
+      const fill = n.fills[0];
+      if (fill.type === 'SOLID' && fill.color) {
+        const r = Math.round(fill.color.r * 255);
+        const g = Math.round(fill.color.g * 255);
+        const b = Math.round(fill.color.b * 255);
+        const colorStr = `Color(0xFF${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')})`;
+        
+        if (n.name.toLowerCase().includes('header') || n.name.toLowerCase().includes('appbar')) {
+          colors.primaryColor = colorStr;
+        }
+        if (n.name.toLowerCase().includes('background') || n.name.toLowerCase().includes('body')) {
+          colors.backgroundColor = colorStr;
+        }
+      }
+    }
+    if (n.children) {
+      n.children.forEach(findColors);
+    }
+  }
+  
+  findColors(node);
+  return colors;
+}
+
+function extractTextStyles(node) {
+  const styles = [];
+  
+  function findText(n) {
+    if (n.type === 'TEXT' && n.style) {
+      styles.push({
+        name: n.name,
+        style: n.style
+      });
+    }
+    if (n.children) {
+      n.children.forEach(findText);
+    }
+  }
+  
+  findText(node);
+  return styles;
+}
+
+function generateChildWidgets(children, indent) {
+  const pad = '              '.slice(0, indent * 2);
+  
+  if (children.length === 0) {
+    return `// Empty screen`;
+  }
+  
+  return children.slice(0, 10).map((child, i) => {
+    if (child.type === 'TEXT' || child.name.toLowerCase().includes('text')) {
+      return `${pad}// Text: ${child.name}`;
     }
     if (child.type === 'RECTANGLE' || child.type === 'FRAME') {
-      const fills = child.fills?.[0] || {};
-      const color = fills.color || { r: 0.9, g: 0.9, b: 0.9, a: 1 };
-      const width = child.absoluteBoundingBox?.width || 200;
-      const height = child.absoluteBoundingBox?.height || 100;
-      return `Container(
-                width: ${width}.0,
-                height: ${height}.0,
-                decoration: BoxDecoration(
-                  color: Color.fromRGBO(
-                    ${Math.round(color.r * 255)}, 
-                    ${Math.round(color.g * 255)}, 
-                    ${Math.round(color.b * 255)}, 
-                    ${color.a || 1}
-                  ),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-              const SizedBox(height: 16),`;
+      const box = child.absoluteBoundingBox || {};
+      const width = box.width || 100;
+      const height = box.height || 50;
+      return `${pad}Container(
+${pad}  width: ${width.toFixed(0)},
+${pad}  height: ${height.toFixed(0)},
+${pad}),`;
     }
-    if (child.type === 'COMPONENT') {
-      return `const Card(
-                child: ListTile(
-                  leading: Icon(Icons.widgets),
-                  title: Text('${child.name}'),
-                ),
-              ),
-              const SizedBox(height: 8),`;
-    }
-    return '';
-  }).filter(Boolean).join('\n              ');
+    return `${pad}// ${child.type}: ${child.name}`;
+  }).join('\n');
 }
 
-function generateWidgetMethods(children) {
-  const components = children.filter(c => c.type === 'COMPONENT');
-  if (components.length === 0) return '';
+function generateWidgets(children, indent) {
+  const pad = '  '.repeat(indent);
   
-  return components.map(c => {
-    const name = c.name.replace(/[^a-zA-Z0-9]/g, '');
-    return `
-  Widget _build${name}(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Text('${c.name}'),
-      ),
-    );
-  }`;
-  }).join('');
-}
-
-function generateHelperWidgets() {
   return `
-
-// Auto-generated helper widgets
-class PrimaryButton extends StatelessWidget {
-  final String label;
-  final VoidCallback? onPressed;
-
-  const PrimaryButton({
-    super.key,
-    required this.label,
-    this.onPressed,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return ElevatedButton(
-      onPressed: onPressed,
-      child: Text(label),
-    );
-  }
-}
-
-class CustomCard extends StatelessWidget {
-  final Widget child;
-  final EdgeInsets? padding;
-
-  const CustomCard({
-    super.key,
-    required this.child,
-    this.padding,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: padding ?? const EdgeInsets.all(16),
-        child: child,
-      ),
-    );
-  }
-}
+${pad}// Additional widgets can be added here
+${pad}// Generated from Figma design
 `;
 }
 
-function escapeString(str) {
-  if (!str) return '';
-  return str.replace(/'/g, "\\'").replace(/\n/g, ' ').trim();
+// === PARSE Figma URL ===
+function parseFigmaUrl(url) {
+  const match = url.match(/figma\.com\/design\/([a-zA-Z0-9]+)[^?]*\?node-id=([0-9:-]+)/);
+  
+  if (!match) {
+    throw new Error('Invalid Figma URL. Expected format: https://www.figma.com/design/FILEKEY/...?node-id=123:456');
+  }
+  
+  let nodeId = match[2].replace('-', ':');
+  
+  return {
+    fileKey: match[1],
+    nodeId: nodeId
+  };
 }
 
-// === MAIN AGENT LOOP ===
-async function pollAndProcess() {
-  try {
-    // Poll for next pending request
-    const request = await apiGet('/api/agent/next');
+// === TASK PROCESSING ===
+async function processTask(task) {
+  console.log(`\n📋 Processing: ${task.message || 'Figma design'}`);
+  
+  if (task.figmaUrl) {
+    const { fileKey, nodeId } = parseFigmaUrl(task.figmaUrl);
     
-    if (request.status === 'no_pending_requests') {
-      return false;
-    }
+    const figmaData = await getFigmaDesign(fileKey, nodeId);
+    const screenName = 'FigmaScreen';
     
-    console.log(`\n📋 Processing Request #${request.id}`);
-    console.log(`   Figma URL: ${request.figmaUrl}`);
-    console.log(`   File Key: ${request.fileKey}`);
-    console.log(`   Node ID: ${request.nodeId}`);
-    
-    // Fetch Figma design
-    const figmaData = await getFigmaDesign(request.fileKey, request.nodeId);
-    
-    // Generate Flutter code
-    const { screenName, dartCode } = generateFlutterCode(figmaData);
+    const dartCode = generateFlutterCode(figmaData, screenName);
     
     // Save file
-    const fileName = `${screenName.toLowerCase()}_screen.dart`;
+    if (!fs.existsSync(OUTPUT_DIR)) {
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+    }
+    
+    const fileName = `screen_${Date.now()}.dart`;
     const filePath = path.join(OUTPUT_DIR, fileName);
     fs.writeFileSync(filePath, dartCode);
     
     console.log(`\n✅ Generated: ${filePath}`);
+    return { success: true, filePath };
+  }
+  
+  throw new Error('No figmaUrl provided');
+}
+
+// === POLL FROM SERVER ===
+async function pollServer() {
+  try {
+    const url = new URL('/api/agent/next', SERVER_URL);
+    const protocol = url.protocol === 'https:' ? https : http;
     
-    // Notify server
-    await apiPost(`/api/agent/complete/${request.id}`, {
-      success: true,
-      files: [fileName],
-      outputDir: OUTPUT_DIR,
-      screenName
+    const options = {
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: url.pathname,
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    };
+    
+    return new Promise((resolve, reject) => {
+      const req = protocol.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            resolve({ status: 'no_pending_requests' });
+          }
+        });
+      });
+      
+      req.on('error', () => resolve({ status: 'no_pending_requests' }));
+      req.setTimeout(5000, () => {
+        req.destroy();
+        resolve({ status: 'timeout' });
+      });
+      req.end();
     });
-    
-    console.log(`📤 Server notified of completion`);
-    return true;
-    
-  } catch (error) {
-    console.error(`❌ Error: ${error.message}`);
-    return false;
+  } catch (e) {
+    return { status: 'error', message: e.message };
   }
 }
 
+// === MAIN ===
 async function main() {
-  console.log('🚀 Agent started. Polling for requests...\n');
+  console.log(`
+╔══════════════════════════════════════════════════════════╗
+║         FIGMA TO FLUTTER AGENT v1.1                       ║
+║         Standalone Mode                                   ║
+╚══════════════════════════════════════════════════════════╝
+  `);
+
+  console.log(`Output: ${OUTPUT_DIR}`);
+  console.log('');
+
+  // Create output directory
+  if (!fs.existsSync(OUTPUT_DIR)) {
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  }
+
+  // Check for command line arguments
+  const args = process.argv.slice(2);
   
-  // Initial poll
-  await pollAndProcess();
-  
-  // Continue polling
-  setInterval(async () => {
-    await pollAndProcess();
-  }, POLL_INTERVAL);
+  if (args.length > 0) {
+    if (args[0] === '--url' && args[1]) {
+      // Direct URL mode
+      await processTask({
+        message: 'Generate from URL',
+        figmaUrl: args[1]
+      });
+      process.exit(0);
+    }
+    
+    if (args[0] === '--poll') {
+      // Poll server mode
+      console.log('🔄 Polling server for tasks...\n');
+      
+      while (true) {
+        const response = await pollServer();
+        
+        if (response && response.id) {
+          console.log(`\n📋 Found task: ${response.id}`);
+          
+          try {
+            await processTask({
+              message: response.message,
+              figmaUrl: response.figmaUrl,
+              fileKey: response.fileKey,
+              nodeId: response.nodeId
+            });
+            
+            // Notify server
+            console.log('📤 Notifying server...');
+          } catch (e) {
+            console.error(`❌ Error: ${e.message}`);
+          }
+        }
+        
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      }
+    }
+  }
+
+  // Default: show usage
+  console.log('Usage:');
+  console.log('  node run-agent.js --url "https://www.figma.com/design/..."  Generate from URL');
+  console.log('  node run-agent.js --poll                                        Poll server for tasks');
+  console.log('');
 }
 
-// === START ===
 main().catch(console.error);
 
 // Handle graceful shutdown
